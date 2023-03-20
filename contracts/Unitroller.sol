@@ -30,7 +30,7 @@ contract Unitroller is UnitrollerAdminStorage, ComptrollerErrorReporter {
       */
     event NewAdmin(address oldAdmin, address newAdmin);
 
-    constructor() public {
+    constructor() {
         // Set admin to caller
         admin = msg.sender;
     }
@@ -38,9 +38,7 @@ contract Unitroller is UnitrollerAdminStorage, ComptrollerErrorReporter {
     /*** Admin Functions ***/
     function _setPendingImplementation(address newPendingImplementation) public returns (uint) {
 
-        if (msg.sender != admin) {
-            return fail(Error.UNAUTHORIZED, FailureInfo.SET_PENDING_IMPLEMENTATION_OWNER_CHECK);
-        }
+        if (msg.sender != admin) revert Unauthorized();
 
         address oldPendingImplementation = pendingComptrollerImplementation;
 
@@ -59,7 +57,7 @@ contract Unitroller is UnitrollerAdminStorage, ComptrollerErrorReporter {
     function _acceptImplementation() public returns (uint) {
         // Check caller is pendingImplementation and pendingImplementation ≠ address(0)
         if (msg.sender != pendingComptrollerImplementation || pendingComptrollerImplementation == address(0)) {
-            return fail(Error.UNAUTHORIZED, FailureInfo.ACCEPT_PENDING_IMPLEMENTATION_ADDRESS_CHECK);
+            revert Unauthorized();
         }
 
         // Save current values for inclusion in log
@@ -85,9 +83,7 @@ contract Unitroller is UnitrollerAdminStorage, ComptrollerErrorReporter {
       */
     function _setPendingAdmin(address newPendingAdmin) public returns (uint) {
         // Check caller = admin
-        if (msg.sender != admin) {
-            return fail(Error.UNAUTHORIZED, FailureInfo.SET_PENDING_ADMIN_OWNER_CHECK);
-        }
+        if (msg.sender != admin) revert Unauthorized();
 
         // Save current value, if any, for inclusion in log
         address oldPendingAdmin = pendingAdmin;
@@ -108,9 +104,7 @@ contract Unitroller is UnitrollerAdminStorage, ComptrollerErrorReporter {
       */
     function _acceptAdmin() public returns (uint) {
         // Check caller is pendingAdmin and pendingAdmin ≠ address(0)
-        if (msg.sender != pendingAdmin || msg.sender == address(0)) {
-            return fail(Error.UNAUTHORIZED, FailureInfo.ACCEPT_ADMIN_PENDING_ADMIN_CHECK);
-        }
+        if (msg.sender != pendingAdmin || msg.sender == address(0)) revert Unauthorized();
 
         // Save current values for inclusion in log
         address oldAdmin = admin;
@@ -133,7 +127,7 @@ contract Unitroller is UnitrollerAdminStorage, ComptrollerErrorReporter {
      * It returns to the external caller whatever the implementation returns
      * or forwards reverts.
      */
-    fallback() payable external {
+    fallback() external {
         // delegate all other functions to current implementation
         (bool success, ) = comptrollerImplementation.delegatecall(msg.data);
 

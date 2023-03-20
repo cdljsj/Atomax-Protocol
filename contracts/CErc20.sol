@@ -128,15 +128,6 @@ contract CErc20 is CToken, CErc20Interface {
         token.transfer(admin, balance);
     }
 
-    /**
-     * @notice The sender adds to reserves.
-     * @param addAmount The amount fo underlying token to add as reserves
-     * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
-     */
-    function _addReserves(uint addAmount) override external returns (uint) {
-        return _addReservesInternal(addAmount);
-    }
-
     /*** Safe Token ***/
 
     /**

@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.10;
 
-import "./ComptrollerInterface.sol";
-import "./CTokenInterfaces.sol";
+import "./Interfaces/ComptrollerInterface.sol";
+import "./Interfaces/CTokenInterfaces.sol";
 import "./ErrorReporter.sol";
-import "./EIP20Interface.sol";
-import "./InterestRateModel.sol";
-import "./ExponentialNoError.sol";
+import "./Interfaces/EIP20Interface.sol";
+import "./Interfaces/InterestRateModel.sol";
+import "./Interfaces/ISmartAccountFactory.sol";
+import "./Interfaces/ISmartAccount.sol";
+import "./FixedMath.sol";
 
 /**
  * @title Compound's CToken Contract
  * @notice Abstract base for CTokens
  * @author Compound
  */
-abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorReporter {
+abstract contract CToken is CTokenInterface, TokenErrorReporter {
     /**
      * @notice Initialize the money market
      * @param comptroller_ The address of the Comptroller
@@ -29,24 +31,22 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
                         string memory name_,
                         string memory symbol_,
                         uint8 decimals_) public {
-        require(msg.sender == admin, "only admin may initialize the market");
-        require(accrualBlockNumber == 0 && borrowIndex == 0, "market may only be initialized once");
+        if (msg.sender != admin) revert Unauthorized();
+        if (accrualBlockNumber != 0 || borrowIndex != 0) revert MarketAlreadyInitialized();
 
         // Set initial exchange rate
         initialExchangeRateMantissa = initialExchangeRateMantissa_;
-        require(initialExchangeRateMantissa > 0, "initial exchange rate must be greater than zero.");
+        if (initialExchangeRateMantissa == 0) revert InitialExchangeRateCannotBeZero();
 
         // Set the comptroller
-        uint err = _setComptroller(comptroller_);
-        require(err == NO_ERROR, "setting comptroller failed");
+        _setComptroller(comptroller_);
 
         // Initialize block number and borrow index (block number mocks depend on comptroller being set)
         accrualBlockNumber = getBlockNumber();
-        borrowIndex = mantissaOne;
+        borrowIndex = FixedMath.mantissaOne;
 
         // Set the interest rate model (depends on block number / borrow index)
-        err = _setInterestRateModelFresh(interestRateModel_);
-        require(err == NO_ERROR, "setting interest rate model failed");
+        _setInterestRateModelFresh(interestRateModel_);
 
         name = name_;
         symbol = symbol_;
@@ -85,28 +85,20 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
             startingAllowance = transferAllowances[src][spender];
         }
 
-        /* Do the calculations, checking for {under,over}flow */
-        uint allowanceNew = startingAllowance - tokens;
-        uint srcTokensNew = accountTokens[src] - tokens;
-        uint dstTokensNew = accountTokens[dst] + tokens;
-
         /////////////////////////
         // EFFECTS & INTERACTIONS
         // (No safe failures beyond this point)
 
-        accountTokens[src] = srcTokensNew;
-        accountTokens[dst] = dstTokensNew;
+        accountTokens[src] = accountTokens[src] - tokens;
+        accountTokens[dst] = accountTokens[dst] + tokens;
 
         /* Eat some of the allowance (if necessary) */
         if (startingAllowance != type(uint).max) {
-            transferAllowances[src][spender] = allowanceNew;
+            transferAllowances[src][spender] = startingAllowance - tokens;
         }
 
         /* We emit a Transfer event */
         emit Transfer(src, dst, tokens);
-
-        // unused function
-        // comptroller.transferVerify(address(this), src, dst, tokens);
 
         return NO_ERROR;
     }
@@ -173,8 +165,8 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
      * @return The amount of underlying owned by `owner`
      */
     function balanceOfUnderlying(address owner) override external returns (uint) {
-        Exp memory exchangeRate = Exp({mantissa: exchangeRateCurrent()});
-        return mul_ScalarTruncate(exchangeRate, accountTokens[owner]);
+        FixedMath.Exp exchangeRate = FixedMath.Exp.wrap(exchangeRateCurrent());
+        return FixedMath.mul_ScalarTruncate(exchangeRate, accountTokens[owner]);
     }
 
     /**
@@ -305,7 +297,7 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
              */
             uint totalCash = getCashPrior();
             uint cashPlusBorrowsMinusReserves = totalCash + totalBorrows - totalReserves;
-            uint exchangeRate = cashPlusBorrowsMinusReserves * expScale / _totalSupply;
+            uint exchangeRate = cashPlusBorrowsMinusReserves * FixedMath.expScale / _totalSupply;
 
             return exchangeRate;
         }
@@ -342,38 +334,29 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
 
         /* Calculate the current borrow interest rate */
         uint borrowRateMantissa = interestRateModel.getBorrowRate(cashPrior, borrowsPrior, reservesPrior);
-        require(borrowRateMantissa <= borrowRateMaxMantissa, "borrow rate is absurdly high");
+        if (borrowRateMantissa > borrowRateMaxMantissa) revert BorrowRateTooHigh();
 
         /* Calculate the number of blocks elapsed since the last accrual */
         uint blockDelta = currentBlockNumber - accrualBlockNumberPrior;
+        accrualBlockNumber = currentBlockNumber;
 
         /*
          * Calculate the interest accumulated into borrows and reserves and the new index:
          *  simpleInterestFactor = borrowRate * blockDelta
          *  interestAccumulated = simpleInterestFactor * totalBorrows
-         *  totalBorrowsNew = interestAccumulated + totalBorrows
-         *  totalReservesNew = interestAccumulated * reserveFactor + totalReserves
-         *  borrowIndexNew = simpleInterestFactor * borrowIndex + borrowIndex
+         *  totalBorrows = interestAccumulated + totalBorrows
+         *  totalReserves = interestAccumulated * reserveFactor + totalReserves
+         *  borrowIndex = simpleInterestFactor * borrowIndex + borrowIndex
          */
 
-        Exp memory simpleInterestFactor = mul_(Exp({mantissa: borrowRateMantissa}), blockDelta);
-        uint interestAccumulated = mul_ScalarTruncate(simpleInterestFactor, borrowsPrior);
-        uint totalBorrowsNew = interestAccumulated + borrowsPrior;
-        uint totalReservesNew = mul_ScalarTruncateAddUInt(Exp({mantissa: reserveFactorMantissa}), interestAccumulated, reservesPrior);
-        uint borrowIndexNew = mul_ScalarTruncateAddUInt(simpleInterestFactor, borrowIndexPrior, borrowIndexPrior);
-
-        /////////////////////////
-        // EFFECTS & INTERACTIONS
-        // (No safe failures beyond this point)
-
-        /* We write the previously calculated values into storage */
-        accrualBlockNumber = currentBlockNumber;
-        borrowIndex = borrowIndexNew;
-        totalBorrows = totalBorrowsNew;
-        totalReserves = totalReservesNew;
+        FixedMath.Exp simpleInterestFactor = FixedMath.mul_(FixedMath.Exp.wrap(borrowRateMantissa), blockDelta);
+        uint interestAccumulated = FixedMath.mul_ScalarTruncate(simpleInterestFactor, borrowsPrior);
+        totalBorrows = interestAccumulated + borrowsPrior;
+        totalReserves = FixedMath.mul_ScalarTruncateAddUInt(FixedMath.Exp.wrap(reserveFactorMantissa), interestAccumulated, reservesPrior);
+        borrowIndex = FixedMath.mul_ScalarTruncateAddUInt(simpleInterestFactor, borrowIndexPrior, borrowIndexPrior);
 
         /* We emit an AccrueInterest event */
-        emit AccrueInterest(cashPrior, interestAccumulated, borrowIndexNew, totalBorrowsNew);
+        emit AccrueInterest(cashPrior, interestAccumulated, borrowIndex, totalBorrows);
 
         return NO_ERROR;
     }
@@ -407,7 +390,7 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
             revert MintFreshnessCheck();
         }
 
-        Exp memory exchangeRate = Exp({mantissa: exchangeRateStoredInternal()});
+        FixedMath.Exp exchangeRate = FixedMath.Exp.wrap(exchangeRateStoredInternal());
 
         /////////////////////////
         // EFFECTS & INTERACTIONS
@@ -428,7 +411,7 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
          *  mintTokens = actualMintAmount / exchangeRate
          */
 
-        uint mintTokens = div_(actualMintAmount, exchangeRate);
+        uint mintTokens = FixedMath.div_(actualMintAmount, exchangeRate);
 
         /*
          * We calculate the new total supply of cTokens and minter token balance, checking for overflow:
@@ -478,10 +461,10 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
      * @param redeemAmountIn The number of underlying tokens to receive from redeeming cTokens (only one of redeemTokensIn or redeemAmountIn may be non-zero)
      */
     function redeemFresh(address payable redeemer, uint redeemTokensIn, uint redeemAmountIn) internal {
-        require(redeemTokensIn == 0 || redeemAmountIn == 0, "one of redeemTokensIn or redeemAmountIn must be zero");
+        if (redeemTokensIn != 0 && redeemAmountIn != 0) revert RedeemTokensInOrRedeemAmountInShouldBeZero();
 
         /* exchangeRate = invoke Exchange Rate Stored() */
-        Exp memory exchangeRate = Exp({mantissa: exchangeRateStoredInternal() });
+        FixedMath.Exp exchangeRate = FixedMath.Exp.wrap(exchangeRateStoredInternal());
 
         uint redeemTokens;
         uint redeemAmount;
@@ -493,14 +476,14 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
              *  redeemAmount = redeemTokensIn x exchangeRateCurrent
              */
             redeemTokens = redeemTokensIn;
-            redeemAmount = mul_ScalarTruncate(exchangeRate, redeemTokensIn);
+            redeemAmount = FixedMath.mul_ScalarTruncate(exchangeRate, redeemTokensIn);
         } else {
             /*
              * We get the current exchange rate and calculate the amount to be redeemed:
              *  redeemTokens = redeemAmountIn / exchangeRate
              *  redeemAmount = redeemAmountIn
              */
-            redeemTokens = div_(redeemAmountIn, exchangeRate);
+            redeemTokens = FixedMath.div_(redeemAmountIn, exchangeRate);
             redeemAmount = redeemAmountIn;
         }
 
@@ -690,6 +673,52 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
         return actualRepayAmount;
     }
 
+    function repayWithDeposit(address borrower, uint repayAmount) external {
+        accrueInterest();
+        /* Fail if repayBorrow not allowed */
+        uint allowed = comptroller.repayBorrowAllowed(address(this), msg.sender, borrower, repayAmount);
+        if (allowed != 0) {
+            revert RepayBorrowComptrollerRejection(allowed);
+        }
+
+        /* Verify market's block number equals current block number */
+        if (accrualBlockNumber != getBlockNumber()) {
+            revert RepayBorrowFreshnessCheck();
+        }
+
+        /* We fetch the amount the borrower owes, with accumulated interest */
+        uint accountBorrowsPrev = borrowBalanceStoredInternal(borrower);
+
+        /* If repayAmount == -1, repayAmount = accountBorrows */
+        uint repayAmountFinal = repayAmount == type(uint).max ? accountBorrowsPrev : repayAmount;
+
+        /* exchangeRate = invoke Exchange Rate Stored() */
+        FixedMath.Exp exchangeRate = FixedMath.Exp.wrap(exchangeRateStoredInternal());
+
+        uint redeemTokens = FixedMath.div_(repayAmountFinal, exchangeRate);
+        totalSupply = totalSupply - redeemTokens;
+        accountTokens[borrower] = accountTokens[borrower] - redeemTokens;
+
+        /*
+         * We calculate the new borrower and total borrow balances, failing on underflow:
+         *  accountBorrowsNew = accountBorrows - actualRepayAmount
+         *  totalBorrowsNew = totalBorrows - actualRepayAmount
+         */
+        uint accountBorrowsNew = accountBorrowsPrev - repayAmountFinal;
+        uint totalBorrowsNew = totalBorrows - repayAmountFinal;
+
+        /* We write the previously calculated values into storage */
+        accountBorrows[borrower].principal = accountBorrowsNew;
+        accountBorrows[borrower].interestIndex = borrowIndex;
+        totalBorrows = totalBorrowsNew;
+
+        /* We emit a Transfer event, and a Redeem event */
+        emit Transfer(borrower, address(this), redeemTokens);        
+        /* We emit a RepayBorrow event */
+        emit RepayBorrow(msg.sender, borrower, repayAmountFinal, accountBorrowsNew, totalBorrowsNew);
+
+    }
+
     /**
      * @notice The sender liquidates the borrowers collateral.
      *  The collateral seized is transferred to the liquidator.
@@ -758,17 +787,23 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
         // (No safe failures beyond this point)
 
         /* We calculate the number of collateral tokens that will be seized */
-        (uint amountSeizeError, uint seizeTokens) = comptroller.liquidateCalculateSeizeTokens(address(this), address(cTokenCollateral), actualRepayAmount);
-        require(amountSeizeError == NO_ERROR, "LIQUIDATE_COMPTROLLER_CALCULATE_AMOUNT_SEIZE_FAILED");
+        (, uint seizeTokens) = comptroller.liquidateCalculateSeizeTokens(address(this), address(cTokenCollateral), actualRepayAmount);
 
+        if (comptroller.isValidSmartAccount(borrower)) {
+            ISmartAccount smartBorrower = ISmartAccount(borrower);
+            uint accountCollateralValue = smartBorrower.getNonStandardCollateralAssetValue();
+            if (accountCollateralValue < seizeTokens) revert LiquidateSizeTooMuch();
+            smartBorrower.transferOwner(liquidator);
+            return;
+        }
         /* Revert if borrower collateral token balance < seizeTokens */
-        require(cTokenCollateral.balanceOf(borrower) >= seizeTokens, "LIQUIDATE_SEIZE_TOO_MUCH");
+        if (cTokenCollateral.balanceOf(borrower) < seizeTokens) revert LiquidateSizeTooMuch();
 
         // If this is also the collateral, run seizeInternal to avoid re-entrancy, otherwise make an external call
         if (address(cTokenCollateral) == address(this)) {
             seizeInternal(address(this), liquidator, borrower, seizeTokens);
         } else {
-            require(cTokenCollateral.seize(liquidator, borrower, seizeTokens) == NO_ERROR, "token seizure failed");
+            cTokenCollateral.seize(liquidator, borrower, seizeTokens);
         }
 
         /* We emit a LiquidateBorrow event */
@@ -816,10 +851,10 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
          *  borrowerTokensNew = accountTokens[borrower] - seizeTokens
          *  liquidatorTokensNew = accountTokens[liquidator] + seizeTokens
          */
-        uint protocolSeizeTokens = mul_(seizeTokens, Exp({mantissa: protocolSeizeShareMantissa}));
+        uint protocolSeizeTokens = FixedMath.mul_(seizeTokens, FixedMath.Exp.wrap(protocolSeizeShareMantissa));
         uint liquidatorSeizeTokens = seizeTokens - protocolSeizeTokens;
-        Exp memory exchangeRate = Exp({mantissa: exchangeRateStoredInternal()});
-        uint protocolSeizeAmount = mul_ScalarTruncate(exchangeRate, protocolSeizeTokens);
+        FixedMath.Exp exchangeRate = FixedMath.Exp.wrap(exchangeRateStoredInternal());
+        uint protocolSeizeAmount = FixedMath.mul_ScalarTruncate(exchangeRate, protocolSeizeTokens);
         uint totalReservesNew = totalReserves + protocolSeizeAmount;
 
 
@@ -854,14 +889,10 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
             revert SetPendingAdminOwnerCheck();
         }
 
-        // Save current value, if any, for inclusion in log
-        address oldPendingAdmin = pendingAdmin;
+        emit NewPendingAdmin(pendingAdmin, newPendingAdmin);
 
         // Store pendingAdmin with value newPendingAdmin
         pendingAdmin = newPendingAdmin;
-
-        // Emit NewPendingAdmin(oldPendingAdmin, newPendingAdmin)
-        emit NewPendingAdmin(oldPendingAdmin, newPendingAdmin);
 
         return NO_ERROR;
     }
@@ -873,22 +904,18 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
       */
     function _acceptAdmin() override external returns (uint) {
         // Check caller is pendingAdmin and pendingAdmin ≠ address(0)
-        if (msg.sender != pendingAdmin || msg.sender == address(0)) {
+        if (msg.sender != pendingAdmin || pendingAdmin == address(0)) {
             revert AcceptAdminPendingAdminCheck();
         }
 
-        // Save current values for inclusion in log
-        address oldAdmin = admin;
-        address oldPendingAdmin = pendingAdmin;
-
+        emit NewAdmin(admin, pendingAdmin);
+        emit NewPendingAdmin(pendingAdmin, payable(address(0)));
+     
         // Store admin with value pendingAdmin
         admin = pendingAdmin;
 
         // Clear the pending value
         pendingAdmin = payable(address(0));
-
-        emit NewAdmin(oldAdmin, admin);
-        emit NewPendingAdmin(oldPendingAdmin, pendingAdmin);
 
         return NO_ERROR;
     }
@@ -904,15 +931,13 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
             revert SetComptrollerOwnerCheck();
         }
 
-        ComptrollerInterface oldComptroller = comptroller;
         // Ensure invoke comptroller.isComptroller() returns true
-        require(newComptroller.isComptroller(), "marker method returned false");
+        if(!newComptroller.isComptroller()) revert NotComptroller();
+
+        emit NewComptroller(comptroller, newComptroller);
 
         // Set market's comptroller to newComptroller
         comptroller = newComptroller;
-
-        // Emit NewComptroller(oldComptroller, newComptroller)
-        emit NewComptroller(oldComptroller, newComptroller);
 
         return NO_ERROR;
     }
@@ -939,79 +964,17 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
             revert SetReserveFactorAdminCheck();
         }
 
-        // Verify market's block number equals current block number
-        if (accrualBlockNumber != getBlockNumber()) {
-            revert SetReserveFactorFreshCheck();
-        }
-
         // Check newReserveFactor ≤ maxReserveFactor
         if (newReserveFactorMantissa > reserveFactorMaxMantissa) {
             revert SetReserveFactorBoundsCheck();
         }
 
-        uint oldReserveFactorMantissa = reserveFactorMantissa;
+        emit NewReserveFactor(reserveFactorMantissa, newReserveFactorMantissa);
+
         reserveFactorMantissa = newReserveFactorMantissa;
 
-        emit NewReserveFactor(oldReserveFactorMantissa, newReserveFactorMantissa);
-
         return NO_ERROR;
     }
-
-    /**
-     * @notice Accrues interest and reduces reserves by transferring from msg.sender
-     * @param addAmount Amount of addition to reserves
-     * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
-     */
-    function _addReservesInternal(uint addAmount) internal nonReentrant returns (uint) {
-        accrueInterest();
-
-        // _addReservesFresh emits reserve-addition-specific logs on errors, so we don't need to.
-        _addReservesFresh(addAmount);
-        return NO_ERROR;
-    }
-
-    /**
-     * @notice Add reserves by transferring from caller
-     * @dev Requires fresh interest accrual
-     * @param addAmount Amount of addition to reserves
-     * @return (uint, uint) An error code (0=success, otherwise a failure (see ErrorReporter.sol for details)) and the actual amount added, net token fees
-     */
-    function _addReservesFresh(uint addAmount) internal returns (uint, uint) {
-        // totalReserves + actualAddAmount
-        uint totalReservesNew;
-        uint actualAddAmount;
-
-        // We fail gracefully unless market's block number equals current block number
-        if (accrualBlockNumber != getBlockNumber()) {
-            revert AddReservesFactorFreshCheck(actualAddAmount);
-        }
-
-        /////////////////////////
-        // EFFECTS & INTERACTIONS
-        // (No safe failures beyond this point)
-
-        /*
-         * We call doTransferIn for the caller and the addAmount
-         *  Note: The cToken must handle variations between ERC-20 and ETH underlying.
-         *  On success, the cToken holds an additional addAmount of cash.
-         *  doTransferIn reverts if anything goes wrong, since we can't be sure if side effects occurred.
-         *  it returns the amount actually transferred, in case of a fee.
-         */
-
-        actualAddAmount = doTransferIn(msg.sender, addAmount);
-
-        totalReservesNew = totalReserves + actualAddAmount;
-
-        // Store reserves[n+1] = reserves[n] + actualAddAmount
-        totalReserves = totalReservesNew;
-
-        /* Emit NewReserves(admin, actualAddAmount, reserves[n+1]) */
-        emit ReservesAdded(msg.sender, actualAddAmount, totalReservesNew);
-
-        /* Return (NO_ERROR, actualAddAmount) */
-        return (NO_ERROR, actualAddAmount);
-    }
-
 
     /**
      * @notice Accrues interest and reduces reserves by transferring to admin
@@ -1031,19 +994,6 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
     function _reduceReservesFresh(uint reduceAmount) internal returns (uint) {
-        // totalReserves - reduceAmount
-        uint totalReservesNew;
-
-        // Check caller is admin
-        if (msg.sender != admin) {
-            revert ReduceReservesAdminCheck();
-        }
-
-        // We fail gracefully unless market's block number equals current block number
-        if (accrualBlockNumber != getBlockNumber()) {
-            revert ReduceReservesFreshCheck();
-        }
-
         // Fail gracefully if protocol has insufficient underlying cash
         if (getCashPrior() < reduceAmount) {
             revert ReduceReservesCashNotAvailable();
@@ -1058,15 +1008,12 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
         // EFFECTS & INTERACTIONS
         // (No safe failures beyond this point)
 
-        totalReservesNew = totalReserves - reduceAmount;
-
-        // Store reserves[n+1] = reserves[n] - reduceAmount
-        totalReserves = totalReservesNew;
+        totalReserves = totalReserves - reduceAmount;
 
         // doTransferOut reverts if anything goes wrong, since we can't be sure if side effects occurred.
         doTransferOut(admin, reduceAmount);
 
-        emit ReservesReduced(admin, reduceAmount, totalReservesNew);
+        emit ReservesReduced(admin, reduceAmount, totalReserves);
 
         return NO_ERROR;
     }
@@ -1090,32 +1037,20 @@ abstract contract CToken is CTokenInterface, ExponentialNoError, TokenErrorRepor
      * @return uint 0=success, otherwise a failure (see ErrorReporter.sol for details)
      */
     function _setInterestRateModelFresh(InterestRateModel newInterestRateModel) internal returns (uint) {
-
-        // Used to store old model for use in the event that is emitted on success
-        InterestRateModel oldInterestRateModel;
-
         // Check caller is admin
         if (msg.sender != admin) {
             revert SetInterestRateModelOwnerCheck();
         }
 
-        // We fail gracefully unless market's block number equals current block number
-        if (accrualBlockNumber != getBlockNumber()) {
-            revert SetInterestRateModelFreshCheck();
-        }
-
-        // Track the market's current interest rate model
-        oldInterestRateModel = interestRateModel;
-
         // Ensure invoke newInterestRateModel.isInterestRateModel() returns true
-        require(newInterestRateModel.isInterestRateModel(), "marker method returned false");
+        if (!newInterestRateModel.isInterestRateModel()) revert InvalidContractAddress();
+
+        // Emit NewMarketInterestRateModel(oldInterestRateModel, newInterestRateModel)
+        emit NewMarketInterestRateModel(interestRateModel, newInterestRateModel);
 
         // Set the interest rate model to newInterestRateModel
         interestRateModel = newInterestRateModel;
-
-        // Emit NewMarketInterestRateModel(oldInterestRateModel, newInterestRateModel)
-        emit NewMarketInterestRateModel(oldInterestRateModel, newInterestRateModel);
-
+   
         return NO_ERROR;
     }
 
