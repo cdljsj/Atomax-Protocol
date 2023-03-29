@@ -675,8 +675,9 @@ abstract contract CToken is CTokenInterface, TokenErrorReporter {
 
     function repayWithDeposit(address borrower, uint repayAmount) external {
         accrueInterest();
+        address repayer = msg.sender;
         /* Fail if repayBorrow not allowed */
-        uint allowed = comptroller.repayBorrowAllowed(address(this), msg.sender, borrower, repayAmount);
+        uint allowed = comptroller.repayBorrowAllowed(address(this), repayer, borrower, repayAmount);
         if (allowed != 0) {
             revert RepayBorrowComptrollerRejection(allowed);
         }
@@ -696,8 +697,16 @@ abstract contract CToken is CTokenInterface, TokenErrorReporter {
         FixedMath.Exp exchangeRate = FixedMath.Exp.wrap(exchangeRateStoredInternal());
 
         uint redeemTokens = FixedMath.div_(repayAmountFinal, exchangeRate);
+
+        if (repayer != borrower) {
+            allowed = comptroller.redeemAllowed(address(this), repayer, redeemTokens);
+            if (allowed != 0) {
+                revert RedeemComptrollerRejection(allowed);
+            }
+        }
+       
         totalSupply = totalSupply - redeemTokens;
-        accountTokens[borrower] = accountTokens[borrower] - redeemTokens;
+        accountTokens[repayer] = accountTokens[repayer] - redeemTokens;
 
         /*
          * We calculate the new borrower and total borrow balances, failing on underflow:
@@ -713,9 +722,9 @@ abstract contract CToken is CTokenInterface, TokenErrorReporter {
         totalBorrows = totalBorrowsNew;
 
         /* We emit a Transfer event, and a Redeem event */
-        emit Transfer(borrower, address(this), redeemTokens);        
+        emit Transfer(repayer, address(this), redeemTokens);        
         /* We emit a RepayBorrow event */
-        emit RepayBorrow(msg.sender, borrower, repayAmountFinal, accountBorrowsNew, totalBorrowsNew);
+        emit RepayBorrow(repayer, borrower, repayAmountFinal, accountBorrowsNew, totalBorrowsNew);
 
     }
 
@@ -793,7 +802,7 @@ abstract contract CToken is CTokenInterface, TokenErrorReporter {
             ISmartAccount smartBorrower = ISmartAccount(borrower);
             uint accountCollateralValue = smartBorrower.getNonStandardCollateralAssetValue();
             if (accountCollateralValue < seizeTokens) revert LiquidateSizeTooMuch();
-            smartBorrower.transferOwner(liquidator);
+            smartBorrower.liquidate(borrower, liquidator);
             return;
         }
         /* Revert if borrower collateral token balance < seizeTokens */
@@ -1076,7 +1085,9 @@ abstract contract CToken is CTokenInterface, TokenErrorReporter {
      */
     function doTransferOut(address payable to, uint amount) virtual internal;
 
-
+    function isNativeToken() external pure virtual returns (bool) {
+        return false;
+    }
     /*** Reentrancy Guard ***/
 
     /**

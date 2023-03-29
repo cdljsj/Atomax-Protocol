@@ -36,7 +36,7 @@ contract RewardsPool is Ownable {
     /// @notice The initial COMP index for a market
     uint224 public constant rewardsInitialIndex = 1e36;
 
-    address public rewardsToken;
+    EIP20Interface public rewardsToken;
 
     Comptroller public comptroller;
 
@@ -58,6 +58,10 @@ contract RewardsPool is Ownable {
     /// @notice The COMP accrued but not yet transferred to each user
     mapping(address => uint) public rewardsAccrued;
 
+    constructor(EIP20Interface rewardsToken_, Comptroller comptroller_) {
+        rewardsToken = rewardsToken_;
+        comptroller = comptroller_;
+    }
 
     /**
      * @notice Set COMP borrow and supply speeds for the specified markets.
@@ -72,6 +76,7 @@ contract RewardsPool is Ownable {
         if (numTokens != supplySpeeds.length || numTokens != borrowSpeeds.length) revert IllegalArgument();
 
         for (uint i = 0; i < numTokens; ++i) {
+            _addRewardsMarketInternal(address(cTokens[i]));
             setRewardsSpeedInternal(cTokens[i], supplySpeeds[i], borrowSpeeds[i]);
         }
     }
@@ -315,10 +320,10 @@ contract RewardsPool is Ownable {
      * @return The amount of COMP which was NOT transferred to the user
      */
     function grantRewardsInternal(address user, uint amount) internal returns (uint) {
-        EIP20Interface comp = EIP20Interface(rewardsToken);
-        uint compRemaining = comp.balanceOf(address(this));
+        // EIP20Interface comp = EIP20Interface(rewardsToken);
+        uint compRemaining = rewardsToken.balanceOf(address(this));
         if (amount > 0 && amount <= compRemaining) {
-            comp.transfer(user, amount);
+            rewardsToken.transfer(user, amount);
             return 0;
         }
         return amount;

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 pragma solidity ^0.8.10;
 
-import "./FilMinerSmartOwner.sol";
+import "./MinerSmartOwner.sol";
 import "../Interfaces/ISmartAccountFactory.sol";
 
 contract FilSmartOwnerFactory is ISmartAccountFactory {
     mapping(address => bool) public smartOwnerPool;
 
-    function createSmartOwner(address superAdmin) external {
-        FilMinerSmartOwner newSmartOwner = new FilMinerSmartOwner(superAdmin);
+    function createSmartOwner(address governor) external {
+        MinerSmartOwner newSmartOwner = new MinerSmartOwner(governor);
         smartOwnerPool[address(newSmartOwner)] = true;
     }
 

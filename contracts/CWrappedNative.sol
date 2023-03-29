@@ -156,7 +156,7 @@ contract CWrappedNative is CToken, CErc20Storage {
         require(balanceAfter - balanceBefore == amount, "!amount");
     }
 
-    function isNativeToken() public pure returns (bool) {
+    function isNativeToken() external pure override returns (bool) {
         return true;
     }
 
