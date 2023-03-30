@@ -21,7 +21,7 @@ contract CommonJumpRateModel is InterestRateModel {
     /**
      * @notice The approximate number of blocks per year that is assumed by the interest rate model
      */
-    uint public constant blocksPerYear = 2102400;
+    uint public blocksPerYear = 2102400;
 
     /**
      * @notice The multiplier of utilization rate that gives the slope of the interest rate
@@ -51,9 +51,9 @@ contract CommonJumpRateModel is InterestRateModel {
      * @param kink_ The utilization point at which the jump multiplier is applied
      * @param owner_ The address of the owner, i.e. the Timelock contract (which has the ability to update parameters directly)
      */
-    constructor(uint baseRatePerYear, uint multiplierPerYear, uint jumpMultiplierPerYear, uint kink_, address owner_) {
+    constructor(uint blocksPerYear_, uint baseRatePerYear, uint multiplierPerYear, uint jumpMultiplierPerYear, uint kink_, address owner_) {
         owner = owner_;
-
+        blocksPerYear = blocksPerYear_;
         updateJumpRateModelInternal(baseRatePerYear,  multiplierPerYear, jumpMultiplierPerYear, kink_);
     }
 

@@ -43,7 +43,7 @@ contract Comptroller is ComptrollerStorage, ComptrollerInterface, ComptrollerErr
     event NewPauseGuardian(address oldPauseGuardian, address newPauseGuardian);
 
     /// @notice Emitted when an action is paused globally
-    event ActionPaused(string action, bool pauseState);
+    event ActionPausedGlobally(string action, bool pauseState);
 
     /// @notice Emitted when an action is paused on a market
     event ActionPaused(CToken cToken, string action, bool pauseState);
@@ -858,14 +858,14 @@ contract Comptroller is ComptrollerStorage, ComptrollerInterface, ComptrollerErr
     function _setTransferPaused(bool state) public returns (bool) {
         checkPermission(state);
         transferGuardianPaused = state;
-        emit ActionPaused("Transfer", state);
+        emit ActionPausedGlobally("Transfer", state);
         return state;
     }
 
     function _setSeizePaused(bool state) external returns (bool) {
         checkPermission(state);
         seizeGuardianPaused = state;
-        emit ActionPaused("Seize", state);
+        emit ActionPausedGlobally("Seize", state);
         return state;
     }
 
