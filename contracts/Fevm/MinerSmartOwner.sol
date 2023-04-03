@@ -14,6 +14,7 @@ contract MinerSmartOwner is ISmartAccount {
     error InvalidAddress();
     error InvalidActorId();
     error MinerAlreadyBound();
+    error MinerNotBound();
 
     event GovernorTransferred(address oldGovernor, address newGovernor);
     event Invoked(address indexed invoker, address indexed target, uint indexed value, bytes data);
@@ -62,10 +63,10 @@ contract MinerSmartOwner is ISmartAccount {
         }
     }
 
-    function getMinerOwner() external returns (address currentOwner, address proposedOwner) {
+    function getMinerOwner() external returns (bytes memory currentOwner, bytes memory proposedOwner) {
         MinerTypes.GetOwnerReturn memory getOwnerReturn = minerId.getOwner();
-        currentOwner = filAdressToAddress(getOwnerReturn.owner);
-        proposedOwner = filAdressToAddress(getOwnerReturn.proposed);
+        currentOwner = getOwnerReturn.owner.data;
+        proposedOwner = getOwnerReturn.proposed.data;
     }
 
     function acceptMinerOwnership(uint64 targetMinerActorId) external onlyGovernor {
@@ -75,6 +76,20 @@ contract MinerSmartOwner is ISmartAccount {
         minerId = CommonTypes.FilActorId.wrap(targetMinerActorId);
         uint64 ownerActorId = PrecompilesAPI.resolveEthAddress(address(this));
         minerId.changeOwnerAddress(FilAddresses.fromActorID(ownerActorId));
+    }
+
+    function transferMinerOwnership(CommonTypes.FilAddress memory newMinerOwner) external onlyGovernor {
+        minerId.changeOwnerAddress(newMinerOwner);
+        minerId = CommonTypes.FilActorId.wrap(0);
+    }
+
+    function transferMinerOwnership(address newMinerOwner) external onlyGovernor {
+        if (newMinerOwner == address(0)) revert IllegalArgument();
+        if (CommonTypes.FilActorId.unwrap(minerId) == 0) revert MinerNotBound();
+
+        uint64 ownerActorId = PrecompilesAPI.resolveEthAddress(address(newMinerOwner));
+        minerId.changeOwnerAddress(FilAddresses.fromActorID(ownerActorId));
+        minerId = CommonTypes.FilActorId.wrap(0);
     }
 
     function isControllingAddress(address controller) external returns (bool) {
