@@ -871,7 +871,14 @@ contract Comptroller is ComptrollerStorage, ComptrollerInterface, ComptrollerErr
 
     function _setRewardsPool(RewardsPool rewardsPool_) external {
         if (msg.sender != admin) revert Unauthorized();
+        
         rewardsPool = rewardsPool_;
+    }
+
+    function _setSmartAccountFactory(ISmartAccountFactory smartAccountFactory_) external {
+        if (msg.sender != admin) revert Unauthorized();
+
+        smartAccountFactory = smartAccountFactory_;
     }
 
     function checkPermission(bool state) private view {

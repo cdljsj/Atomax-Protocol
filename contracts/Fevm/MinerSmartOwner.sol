@@ -7,6 +7,7 @@ import "@zondax/filecoin-solidity/contracts/v0.8/utils/FilAddresses.sol";
 import "@zondax/filecoin-solidity/contracts/v0.8/PrecompilesAPI.sol";
 import "../Interfaces/ISmartAccount.sol";
 import "../Interfaces/EIP20Interface.sol";
+import "../CWrappedNative.sol";
 
 contract MinerSmartOwner is ISmartAccount {
     error Unauthorized();
@@ -15,6 +16,7 @@ contract MinerSmartOwner is ISmartAccount {
     error InvalidActorId();
     error MinerAlreadyBound();
     error MinerNotBound();
+    error NegativeValueNotAllowed();
 
     event GovernorTransferred(address oldGovernor, address newGovernor);
     event Invoked(address indexed invoker, address indexed target, uint indexed value, bytes data);
@@ -23,14 +25,16 @@ contract MinerSmartOwner is ISmartAccount {
     using MinerAPI for CommonTypes.FilActorId;
 
     address public governor;
+    CWrappedNative public lendingPool; 
 
     modifier onlyGovernor {
         if (msg.sender != governor) revert Unauthorized();
         _;
     }
     
-    constructor(address governor_) {
+    constructor(address governor_, address payable lendingPool_) {
         governor = governor_;
+        lendingPool = CWrappedNative(lendingPool_);
     }
 
     function transferGovernor(address newGovernor) external onlyGovernor {
@@ -63,10 +67,26 @@ contract MinerSmartOwner is ISmartAccount {
         }
     }
 
-    function getMinerOwner() external returns (bytes memory currentOwner, bytes memory proposedOwner) {
+    function borrow(uint amount) external onlyGovernor {
+        lendingPool.borrow(amount);
+    }
+
+    function borrowBalance() public returns (uint) {
+        return lendingPool.borrowBalanceCurrent(address(this));
+    }
+
+    function repayBorrow() public payable onlyGovernor {
+        lendingPool.repayBorrow{value: msg.value}();
+    }
+
+    function repayWithDeposit(uint repayAmount) external onlyGovernor {
+        lendingPool.repayWithDeposit(address(this), repayAmount);
+    }
+
+    function getMinerOwner() external returns (CommonTypes.FilAddress memory currentOwner, CommonTypes.FilAddress memory proposedOwner) {
         MinerTypes.GetOwnerReturn memory getOwnerReturn = minerId.getOwner();
-        currentOwner = getOwnerReturn.owner.data;
-        proposedOwner = getOwnerReturn.proposed.data;
+        currentOwner = getOwnerReturn.owner;
+        proposedOwner = getOwnerReturn.proposed;
     }
 
     function acceptMinerOwnership(uint64 targetMinerActorId) external onlyGovernor {
@@ -144,27 +164,34 @@ contract MinerSmartOwner is ISmartAccount {
         return minerId.getMultiaddresses();
     }
 
-    function withdrawBalanceFromMiner(CommonTypes.BigInt memory amount) external onlyGovernor returns (CommonTypes.BigInt memory) {
-        return minerId.withdrawBalance(amount);
+    function withdrawBalanceFromMiner(CommonTypes.BigInt memory amount) external onlyGovernor returns (uint) {
+        uint withdrawAmount = toUint256(minerId.withdrawBalance(amount));
+        uint borrowedAmount = borrowBalance();
+        uint repayAmount = withdrawAmount/2;
+        if (repayAmount > borrowedAmount) {
+            repayAmount = borrowedAmount;
+        }
+        repayBorrow();
+        return withdrawAmount;
     }
 
     function getNonStandardCollateralAssetValue() external pure returns(uint) {
-        return 0;
+        return 100 * (10 ** 18);
     }
 
-    // function toUint256(CommonTypes.BigInt memory value) internal view returns (uint256, bool) {
-    //     if (value.neg) {
-    //         revert NegativeValueNotAllowed();
-    //     }
+    function toUint256(CommonTypes.BigInt memory value) internal pure returns (uint256) {
+        if (value.neg) {
+            revert NegativeValueNotAllowed();
+        }
 
-    //     BigNumber memory max = BigNumbers.init(MAX_UINT, false);
-    //     BigNumber memory bigNumValue = BigNumbers.init(value.val, value.neg);
-    //     if (BigNumbers.gt(bigNumValue, max)) {
-    //         return (0, true);
-    //     }
+        // BigNumber memory max = BigNumbers.init(MAX_UINT, false);
+        // BigNumber memory bigNumValue = BigNumbers.init(value.val, value.neg);
+        // if (BigNumbers.gt(bigNumValue, max)) {
+        //     return (0, true);
+        // }
 
-    //     return (uint256(bytes32(bigNumValue.val)), false);
-    // }
+        return (uint256(bytes32(value.val)));
+    }
 
     function isNativeToken(address token) internal pure returns (bool) {
         return token == address(0);
@@ -183,18 +210,18 @@ contract MinerSmartOwner is ISmartAccount {
     }
 
 
-    function invoke(address target, bytes calldata data) external payable onlyGovernor returns (bytes memory result) {
-        bool success;
-        (success, result) = target.call{value: msg.value}(data);
-        if (!success) {
-            // solhint-disable-next-line no-inline-assembly
-            assembly {
-                returndatacopy(0, 0, returndatasize())
-                revert(0, returndatasize())
-            }
-        }
-        emit Invoked(msg.sender, target, msg.value, data);
-    }
+    // function invoke(address target, bytes calldata data) external payable onlyGovernor returns (bytes memory result) {
+    //     bool success;
+    //     (success, result) = target.call{value: msg.value}(data);
+    //     if (!success) {
+    //         // solhint-disable-next-line no-inline-assembly
+    //         assembly {
+    //             returndatacopy(0, 0, returndatasize())
+    //             revert(0, returndatasize())
+    //         }
+    //     }
+    //     emit Invoked(msg.sender, target, msg.value, data);
+    // }
 
     receive() external payable {
     }

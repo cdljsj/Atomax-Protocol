@@ -97,6 +97,10 @@ contract ChainlinkAdaptor is PriceOracle {
         _setAssetsSources(assets, sources);
     }
 
+    function updateNativeTokenPriceSource(ChainlinkAggregatorV3Interface priceSource) external onlyGovernance {
+        nativeTokenPriceSource = priceSource;
+    }
+
     function setFallbackPriceOracle(address _fallbackPriceOracle) external onlyGovernance {
         fallbackPriceOracle = PriceOracle(_fallbackPriceOracle);
     }
